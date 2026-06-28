@@ -539,6 +539,120 @@ def run_load_checkpoint(
     raise NotImplementedError
 
 
+class Tokenizer:
+    def __init__(
+        self,
+        vocab: dict[int, bytes],
+        merges: list[tuple[bytes, bytes]],
+        special_tokens: list[str] | None = None,
+    ) -> None:
+        import regex
+        self._regex = regex
+
+        self.vocab = dict(vocab)
+        self.merges = list(merges)
+        self.special_tokens = list(special_tokens) if special_tokens else []
+
+        # Append any special tokens not already in vocab
+        existing_bytes = set(self.vocab.values())
+        for token in self.special_tokens:
+            token_bytes = token.encode("utf-8")
+            if token_bytes not in existing_bytes:
+                self.vocab[len(self.vocab)] = token_bytes
+                existing_bytes.add(token_bytes)
+
+        # Reverse vocab for encoding: bytes -> id
+        self._bytes_to_id: dict[bytes, int] = {v: k for k, v in self.vocab.items()}
+
+        # Merge lookup: (left, right) -> merged, in priority order
+        self._merge_rank: dict[tuple[bytes, bytes], int] = {
+            pair: i for i, pair in enumerate(self.merges)
+        }
+
+        # GPT-2 pre-tokenization pattern
+        self._GPT2_PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
+        # Build special-token split pattern (longest first to avoid partial matches)
+        sorted_special = sorted(self.special_tokens, key=len, reverse=True)
+        import re
+        self._special_pat = (
+            re.compile("(" + "|".join(re.escape(t) for t in sorted_special) + ")")
+            if sorted_special else None
+        )
+
+    @classmethod
+    def from_files(
+        cls,
+        vocab_filepath: str,
+        merges_filepath: str,
+        special_tokens: list[str] | None = None,
+    ) -> "Tokenizer":
+        import json
+        with open(vocab_filepath, encoding="utf-8") as f:
+            raw = json.load(f)
+        vocab = {int(k): v.encode("latin-1") if isinstance(v, str) else v for k, v in raw.items()}
+
+        merges = []
+        with open(merges_filepath, encoding="utf-8") as f:
+            for line in f:
+                line = line.rstrip("\n")
+                if not line or line.startswith("#"):
+                    continue
+                left, right = line.split(" ", 1)
+                merges.append((left.encode("utf-8"), right.encode("utf-8")))
+
+        return cls(vocab, merges, special_tokens)
+
+    def _apply_merges(self, chars: list[bytes]) -> list[bytes]:
+        while len(chars) >= 2:
+            # Find the highest-priority (lowest rank) merge available
+            best_rank = len(self.merges)
+            best_idx = -1
+            for i in range(len(chars) - 1):
+                pair = (chars[i], chars[i + 1])
+                rank = self._merge_rank.get(pair, len(self.merges))
+                if rank < best_rank:
+                    best_rank = rank
+                    best_idx = i
+            if best_idx == -1:
+                break
+            merged = chars[best_idx] + chars[best_idx + 1]
+            chars = chars[:best_idx] + [merged] + chars[best_idx + 2:]
+        return chars
+
+    def _encode_chunk(self, text: str) -> list[int]:
+        tokens = self._regex.findall(self._GPT2_PAT, text)
+        ids = []
+        for token in tokens:
+            chars = [bytes([b]) for b in token.encode("utf-8")]
+            merged = self._apply_merges(chars)
+            ids.extend(self._bytes_to_id[chunk] for chunk in merged)
+        return ids
+
+    def encode(self, text: str) -> list[int]:
+        if self._special_pat is None:
+            return self._encode_chunk(text)
+
+        ids = []
+        for part in self._special_pat.split(text):
+            if not part:
+                continue
+            part_bytes = part.encode("utf-8")
+            if part_bytes in self._bytes_to_id:
+                ids.append(self._bytes_to_id[part_bytes])
+            else:
+                ids.extend(self._encode_chunk(part))
+        return ids
+
+    def encode_iterable(self, iterable: Iterable[str]):
+        for text in iterable:
+            yield from self.encode(text)
+
+    def decode(self, ids: list[int]) -> str:
+        raw = b"".join(self.vocab[i] for i in ids)
+        return raw.decode("utf-8", errors="replace")
+
+
 def get_tokenizer(
     vocab: dict[int, bytes],
     merges: list[tuple[bytes, bytes]],
@@ -559,7 +673,7 @@ def get_tokenizer(
     Returns:
         A BPE tokenizer that uses the provided vocab, merges, and special tokens.
     """
-    raise NotImplementedError
+    return Tokenizer(vocab, merges, special_tokens)
 
 
 def _merge_pair(token_counts: dict[str, list], best_pair: tuple[bytes, bytes]) -> None:
