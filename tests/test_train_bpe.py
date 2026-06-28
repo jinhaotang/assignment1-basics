@@ -1,8 +1,107 @@
 import json
+import tempfile
 import time
+import os
 
 from .adapters import run_train_bpe
 from .common import FIXTURES_PATH, gpt2_bytes_to_unicode
+
+
+SENNRICH_CORPUS = """\
+low low low low low
+lower lower widest widest widest
+newest newest newest newest newest newest
+"""
+
+SPECIAL_TOKEN = "<|endoftext|>"
+
+
+def test_sennrich_first_merge():
+    """First merge should be ('s', 't') — tied with ('e', 's') but lexicographically greater."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+        f.write(SENNRICH_CORPUS)
+        tmp = f.name
+    try:
+        # 256 bytes + 1 special token + 1 merge = 258
+        vocab, merges = run_train_bpe(
+            input_path=tmp,
+            vocab_size=258,
+            special_tokens=[SPECIAL_TOKEN],
+        )
+        assert len(merges) == 1
+        assert merges[0] == (b"s", b"t")
+    finally:
+        os.unlink(tmp)
+
+
+def test_sennrich_six_merges():
+    """After 6 merges the sequence should be: st, est, ow, low, west, ne."""
+    expected_merges = [
+        (b"s", b"t"),
+        (b"e", b"st"),
+        (b"o", b"w"),
+        (b"l", b"ow"),
+        (b"w", b"est"),
+        (b"n", b"e"),
+    ]
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+        f.write(SENNRICH_CORPUS)
+        tmp = f.name
+    try:
+        # 256 bytes + 1 special token + 6 merges = 263
+        vocab, merges = run_train_bpe(
+            input_path=tmp,
+            vocab_size=263,
+            special_tokens=[SPECIAL_TOKEN],
+        )
+        assert merges == expected_merges
+    finally:
+        os.unlink(tmp)
+
+
+def test_sennrich_vocab_after_six_merges():
+    """Vocab after 6 merges should contain the 256 byte tokens, the special token,
+    and the 6 merged tokens: st, est, ow, low, west, ne."""
+    expected_merged_tokens = {b"st", b"est", b"ow", b"low", b"west", b"ne"}
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+        f.write(SENNRICH_CORPUS)
+        tmp = f.name
+    try:
+        vocab, merges = run_train_bpe(
+            input_path=tmp,
+            vocab_size=263,
+            special_tokens=[SPECIAL_TOKEN],
+        )
+        assert len(vocab) == 263
+        vocab_values = set(vocab.values())
+        assert SPECIAL_TOKEN.encode("utf-8") in vocab_values
+        assert expected_merged_tokens.issubset(vocab_values)
+        # All 256 byte values present
+        for i in range(256):
+            assert bytes([i]) in vocab_values
+    finally:
+        os.unlink(tmp)
+
+
+def test_sennrich_special_token_not_merged():
+    """Special token should appear as a single vocab entry and never be split."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+        f.write(SENNRICH_CORPUS)
+        tmp = f.name
+    try:
+        vocab, merges = run_train_bpe(
+            input_path=tmp,
+            vocab_size=263,
+            special_tokens=[SPECIAL_TOKEN],
+        )
+        special_bytes = SPECIAL_TOKEN.encode("utf-8")
+        # Appears exactly once in vocab values
+        assert list(vocab.values()).count(special_bytes) == 1
+        # Never appears as a component in any merge
+        for left, right in merges:
+            assert special_bytes not in (left, right)
+    finally:
+        os.unlink(tmp)
 
 
 def test_train_bpe_speed():

@@ -562,7 +562,7 @@ def get_tokenizer(
     raise NotImplementedError
 
 
-def _merge_pair(token_counts: dict[str, list], best_pair: tuple[str, str]) -> None:
+def _merge_pair(token_counts: dict[str, list], best_pair: tuple[bytes, bytes]) -> None:
     merged = best_pair[0] + best_pair[1]
     for token in token_counts:
         chars = token_counts[token][1]
@@ -606,31 +606,38 @@ def run_train_bpe(
                 Merges are ordered by order of creation.
     """
     import re
-    
+    import regex
+
+    GPT2_PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
     with open(input_path, 'r', encoding='utf-8') as f:
         text = f.read()
-    
-    # Split text by special tokens using regex
-    if special_tokens:
-        pattern = "|".join(re.escape(token) for token in special_tokens)
-        text = " ".join(re.split(pattern, text))
-    
-    # Split text into tokens (by whitespace)
-    tokens = text.split()
 
-    # Count occurrences of each unique token; values are [count, list_of_chars]
+    # Split on special tokens first, then apply GPT-2 pre-tokenization to each chunk
+    if special_tokens:
+        split_pattern = "|".join(re.escape(t) for t in special_tokens)
+        chunks = re.split(split_pattern, text)
+    else:
+        chunks = [text]
+
+    tokens = []
+    for chunk in chunks:
+        tokens.extend(regex.findall(GPT2_PAT, chunk))
+
+    # Count occurrences of each unique token; values are [count, list_of_byte_chunks]
+    # Each char in the list is a bytes object (initially one byte each)
     token_counts: dict[str, list] = {}
     for token in tokens:
         if token not in token_counts:
-            token_counts[token] = [0, list(token)]
+            token_counts[token] = [0, [bytes([b]) for b in token.encode("utf-8")]]
         token_counts[token][0] += 1
 
     num_merges = vocab_size - 256 - len(special_tokens)
-    merges = []
+    merges: list[tuple[bytes, bytes]] = []
 
     for _ in range(num_merges):
-        # Count occurrences of each successive character pair across all token occurrences
-        pair_counts: dict[tuple[str, str], int] = {}
+        # Count occurrences of each successive byte-chunk pair across all token occurrences
+        pair_counts: dict[tuple[bytes, bytes], int] = {}
         for token, (count, chars) in token_counts.items():
             for i in range(len(chars) - 1):
                 pair = (chars[i], chars[i + 1])
@@ -651,7 +658,6 @@ def run_train_bpe(
     for token in special_tokens:
         vocab[len(vocab)] = token.encode("utf-8")
     for pair in merges:
-        vocab[len(vocab)] = pair[0].encode("utf-8") + pair[1].encode("utf-8")
+        vocab[len(vocab)] = pair[0] + pair[1]
 
-    merges_bytes = [(p[0].encode("utf-8"), p[1].encode("utf-8")) for p in merges]
-    return vocab, merges_bytes
+    return vocab, merges
