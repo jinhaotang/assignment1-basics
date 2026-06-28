@@ -562,6 +562,22 @@ def get_tokenizer(
     raise NotImplementedError
 
 
+def _merge_pair(token_counts: dict[str, list], best_pair: tuple[str, str]) -> None:
+    merged = best_pair[0] + best_pair[1]
+    for token in token_counts:
+        chars = token_counts[token][1]
+        new_chars = []
+        i = 0
+        while i < len(chars):
+            if i < len(chars) - 1 and chars[i] == best_pair[0] and chars[i + 1] == best_pair[1]:
+                new_chars.append(merged)
+                i += 2
+            else:
+                new_chars.append(chars[i])
+                i += 1
+        token_counts[token][1] = new_chars
+
+
 def run_train_bpe(
     input_path: str | os.PathLike,
     vocab_size: int,
@@ -589,4 +605,53 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    raise NotImplementedError
+    import re
+    
+    with open(input_path, 'r', encoding='utf-8') as f:
+        text = f.read()
+    
+    # Split text by special tokens using regex
+    if special_tokens:
+        pattern = "|".join(re.escape(token) for token in special_tokens)
+        text = " ".join(re.split(pattern, text))
+    
+    # Split text into tokens (by whitespace)
+    tokens = text.split()
+
+    # Count occurrences of each unique token; values are [count, list_of_chars]
+    token_counts: dict[str, list] = {}
+    for token in tokens:
+        if token not in token_counts:
+            token_counts[token] = [0, list(token)]
+        token_counts[token][0] += 1
+
+    num_merges = vocab_size - 256 - len(special_tokens)
+    merges = []
+
+    for _ in range(num_merges):
+        # Count occurrences of each successive character pair across all token occurrences
+        pair_counts: dict[tuple[str, str], int] = {}
+        for token, (count, chars) in token_counts.items():
+            for i in range(len(chars) - 1):
+                pair = (chars[i], chars[i + 1])
+                pair_counts[pair] = pair_counts.get(pair, 0) + count
+
+        if not pair_counts:
+            break
+
+        # Find the pair with highest count; break ties by lexicographically greater pair
+        best_pair = max(pair_counts, key=lambda p: (pair_counts[p], p))
+
+        # Merge best_pair in each token's chars list
+        _merge_pair(token_counts, best_pair)
+        merges.append(best_pair)
+
+    # Build vocab: start with 256 byte tokens, then special tokens, then merged tokens
+    vocab: dict[int, bytes] = {i: bytes([i]) for i in range(256)}
+    for token in special_tokens:
+        vocab[len(vocab)] = token.encode("utf-8")
+    for pair in merges:
+        vocab[len(vocab)] = pair[0].encode("utf-8") + pair[1].encode("utf-8")
+
+    merges_bytes = [(p[0].encode("utf-8"), p[1].encode("utf-8")) for p in merges]
+    return vocab, merges_bytes
