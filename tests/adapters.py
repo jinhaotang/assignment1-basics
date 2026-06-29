@@ -175,7 +175,11 @@ def run_scaled_dot_product_attention(
     Returns:
         Float[Tensor, " ... queries d_v"]: Output of SDPA
     """
-    raise NotImplementedError
+    attn_scores = torch.einsum("...qd,...kd->...qk", Q, K) / torch.sqrt(torch.tensor(Q.shape[-1], dtype=torch.float32))
+    if mask is not None:
+        attn_scores = attn_scores.masked_fill(mask == False, float('-inf'))
+    attn_weights = run_softmax(attn_scores, dim=-1)
+    return torch.einsum("...qk,...kv->...qv", attn_weights, V)
 
 
 def run_multihead_self_attention(
@@ -251,6 +255,38 @@ def run_multihead_self_attention_with_rope(
     """
     raise NotImplementedError
 
+class RotaryPositionalEmbedding(nn.Module):
+    def __init__(
+        self,
+        theta: float,
+        d_k: int,
+        max_seq_len: int,
+        device: torch.device | None = None,
+    ):
+        super().__init__()
+        j = torch.arange(d_k // 2, device=device)
+        freqs = 1.0 / (theta ** (2 * j / d_k))  # (d_k/2,)
+
+        positions = torch.arange(max_seq_len, device=device)  # (max_seq_len,)
+        angles = torch.outer(positions, freqs)  # (max_seq_len, d_k/2)
+
+        cos = torch.cos(angles)  # (max_seq_len, d_k/2)
+        sin = torch.sin(angles)  # (max_seq_len, d_k/2)
+
+        # Build block-diagonal rotation matrices: (max_seq_len, d_k, d_k)
+        R = torch.zeros(max_seq_len, d_k, d_k, device=device)
+        R[:, 2 * j, 2 * j] = cos
+        R[:, 2 * j, 2 * j + 1] = -sin
+        R[:, 2 * j + 1, 2 * j] = sin
+        R[:, 2 * j + 1, 2 * j + 1] = cos
+
+        self.register_buffer("R", R)
+
+    def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
+        Ri = self.R[token_positions]  # (..., seq_len, d_in, d_out)
+        # x: (..., seq_len, d_in)
+        return torch.einsum("...i,...ji->...j", x, Ri)
+
 
 def run_rope(
     d_k: int,
@@ -271,7 +307,8 @@ def run_rope(
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
-    raise NotImplementedError
+    rope = RotaryPositionalEmbedding(theta, d_k, max_seq_len)
+    return rope(in_query_or_key, token_positions)
 
 
 def run_transformer_block(
@@ -504,7 +541,10 @@ def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, "
         Float[Tensor, "..."]: Tensor of with the same shape as `in_features` with the output of
         softmax normalizing the specified `dim`.
     """
-    raise NotImplementedError
+    max_val = in_features.max(dim=dim, keepdim=True).values
+    shifted = in_features - max_val
+    exp = torch.exp(shifted)
+    return exp / exp.sum(dim=dim, keepdim=True)
 
 
 def run_cross_entropy(
