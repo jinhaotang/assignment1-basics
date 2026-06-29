@@ -143,6 +143,10 @@ def run_swiglu(
     Returns:
         Float[Tensor, "... d_model"]: Output embeddings of the same shape as the input embeddings.
     """
+    w1_x = torch.einsum("...i,oi->...o", in_features, w1_weight)
+    w3_x = torch.einsum("...i,oi->...o", in_features, w3_weight)
+    glu = w1_x * torch.sigmoid(w1_x) * w3_x
+    return torch.einsum("...i,oi->...o", glu, w2_weight)
     # Example:
     # If your state dict keys match, you can use `load_state_dict()`
     # swiglu.load_state_dict(weights)
@@ -150,7 +154,7 @@ def run_swiglu(
     # swiglu.w1.weight.data = w1_weight
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
-    raise NotImplementedError
+    
 
 
 def run_scaled_dot_product_attention(
