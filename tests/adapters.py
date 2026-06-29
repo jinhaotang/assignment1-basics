@@ -6,8 +6,72 @@ from typing import IO, Any, BinaryIO
 
 import numpy.typing as npt
 import torch
+import torch.nn as nn
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
+
+
+class RMSNorm(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        eps: float = 1e-5,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+      super().__init__()
+      self.eps = eps
+      self.g = nn.Parameter(
+            torch.empty(d_model, device=device, dtype=dtype)
+        )
+      torch.nn.init.ones_(self.g)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+      in_dtype = x.dtype
+      x = x.to(torch.float32)
+
+      mean_square = x.pow(2).mean(dim=-1, keepdim=True)
+
+      # 3. Add epsilon (1e-5) and take the square root [1]
+      rms_a = torch.sqrt(mean_square + self.eps)
+      result = x / rms_a * self.g
+      return result.to(in_dtype)
+
+
+class Embedding(nn.Module):
+    def __init__(
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        super().__init__()
+        self.weights = nn.Parameter(
+            torch.empty(num_embeddings, embedding_dim, device=device, dtype=dtype)
+        )
+        nn.init.trunc_normal_(self.weights, mean=0.0, std=1.0, a=-3.0, b=3.0)
+
+    def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+        return self.weights[token_ids]
+
+
+class Linear(nn.Module):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        super().__init__()
+        self.weight = nn.Parameter(
+            torch.empty(out_features, in_features, device=device, dtype=dtype)
+        )
+        nn.init.trunc_normal_(self.weight, mean=0.0, std=0.02, a=-0.06, b=0.06)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.einsum("...i,oi->...o", x, self.weight)
 
 
 def run_linear(
@@ -28,8 +92,9 @@ def run_linear(
     Returns:
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
-
-    raise NotImplementedError
+    linear = Linear(in_features=d_in, out_features=d_out)
+    linear.load_state_dict({"weight": weights})
+    return linear(in_features)
 
 
 def run_embedding(
@@ -51,7 +116,9 @@ def run_embedding(
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
 
-    raise NotImplementedError
+    embedding = Embedding(vocab_size, d_model)
+    embedding.load_state_dict({"weights": weights})
+    return embedding(token_ids)
 
 
 def run_swiglu(
@@ -378,7 +445,9 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
-    raise NotImplementedError
+    rms_norm = RMSNorm(d_model, eps)
+    rms_norm.load_state_dict({"g": weights})
+    return rms_norm(in_features)
 
 
 def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
