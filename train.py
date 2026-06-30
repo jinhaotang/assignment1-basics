@@ -212,10 +212,18 @@ def main():
             exp_logger.log(it, {"eval_train_loss": train_loss, "eval_val_loss": val_loss})
             ckpt_path = os.path.join(args.checkpoint_dir, f"ckpt_{it:07d}.pt")
             run_save_checkpoint(model, optimizer, it, ckpt_path)
+            # Patch in model_config so decode.py can load it without re-specifying args
+            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+            ckpt["model_config"] = model.config
+            torch.save(ckpt, ckpt_path)
             print(f"Saved checkpoint: {ckpt_path}")
 
     # Final checkpoint
-    run_save_checkpoint(model, optimizer, args.max_iters, os.path.join(args.checkpoint_dir, "ckpt_final.pt"))
+    final_path = os.path.join(args.checkpoint_dir, "ckpt_final.pt")
+    run_save_checkpoint(model, optimizer, args.max_iters, final_path)
+    ckpt = torch.load(final_path, map_location="cpu", weights_only=True)
+    ckpt["model_config"] = model.config
+    torch.save(ckpt, final_path)
     exp_logger.close()
     print("Training complete.")
 

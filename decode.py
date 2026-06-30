@@ -95,9 +95,19 @@ def main():
     args = parser.parse_args()
 
     # Load checkpoint
-    ckpt = torch.load(args.checkpoint, map_location=args.device)
+    ckpt = torch.load(args.checkpoint, map_location=args.device, weights_only=True)
     model_config = ckpt["model_config"]
-    model_weights = {k: v.to(args.device) for k, v in ckpt["model"].items()}
+    # TransformerLM.register_parameter stores keys with '.' replaced by '_'.
+    # Recover the original dot-notation keys using the known weight key list.
+    from train import TransformerLM
+    _tmp = TransformerLM(**model_config, device="cpu")
+    underscore_to_dot = {dk.replace(".", "_"): dk for dk in _tmp._weight_keys}
+    del _tmp
+    model_weights = {}
+    for k, v in ckpt["model"].items():
+        # strip _orig_mod. prefix added by torch.compile
+        k = k.removeprefix("_orig_mod.")
+        model_weights[underscore_to_dot.get(k, k)] = v.to(args.device)
 
     # Load tokenizer
     with open(args.tokenizer_vocab) as f:

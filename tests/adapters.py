@@ -93,7 +93,7 @@ def run_linear(
     Returns:
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
-    linear = Linear(in_features=d_in, out_features=d_out)
+    linear = Linear(in_features=d_in, out_features=d_out, device=weights.device, dtype=weights.dtype)
     linear.load_state_dict({"weight": weights})
     return linear(in_features)
 
@@ -117,7 +117,7 @@ def run_embedding(
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
 
-    embedding = Embedding(vocab_size, d_model)
+    embedding = Embedding(vocab_size, d_model, device=weights.device, dtype=weights.dtype)
     embedding.load_state_dict({"weights": weights})
     return embedding(token_ids)
 
@@ -342,7 +342,7 @@ def run_rope(
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
-    rope = RotaryPositionalEmbedding(theta, d_k, max_seq_len)
+    rope = RotaryPositionalEmbedding(theta, d_k, max_seq_len, device=in_query_or_key.device)
     return rope(in_query_or_key, token_positions)
 
 
@@ -576,7 +576,7 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
-    rms_norm = RMSNorm(d_model, eps)
+    rms_norm = RMSNorm(d_model, eps, device=weights.device, dtype=weights.dtype)
     rms_norm.load_state_dict({"g": weights})
     return rms_norm(in_features)
 
