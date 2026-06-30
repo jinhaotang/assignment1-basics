@@ -170,7 +170,7 @@ def run_scaled_dot_product_attention(
     Args:
         Q (Float[Tensor, " ... queries d_k"]): Query tensor
         K (Float[Tensor, " ... keys d_k"]): Key tensor
-        V (Float[Tensor, " ... keys d_v"]): Values tensor
+        V (Float[Tensor, " ... key s d_v"]): Values tensor
         mask (Bool[Tensor, " ... queries keys"] | None): Mask tensor
     Returns:
         Float[Tensor, " ... queries d_v"]: Output of SDPA
@@ -213,7 +213,23 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_model"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    seq_len = in_features.shape[-2]
+    d_k = d_model // num_heads
+    causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=in_features.device))
+
+    q = torch.einsum("...i,oi->...o", in_features, q_proj_weight)
+    k = torch.einsum("...i,oi->...o", in_features, k_proj_weight)
+    v = torch.einsum("...i,oi->...o", in_features, v_proj_weight)
+
+    # split into heads: (..., seq_len, d_model) -> (..., num_heads, seq_len, d_k)
+    q = q.unflatten(-1, (num_heads, d_k)).transpose(-2, -3)
+    k = k.unflatten(-1, (num_heads, d_k)).transpose(-2, -3)
+    v = v.unflatten(-1, (num_heads, d_k)).transpose(-2, -3)
+
+    attention = run_scaled_dot_product_attention(q, k, v, mask=causal_mask)
+    # merge heads: (..., num_heads, seq_len, d_k) -> (..., seq_len, d_model)
+    attention = attention.transpose(-2, -3).flatten(-2)
+    return torch.einsum("...i,oi->...o", attention, o_proj_weight)
 
 
 def run_multihead_self_attention_with_rope(
@@ -253,7 +269,25 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_model"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    seq_len = in_features.shape[-2]
+    d_k = d_model // num_heads
+    causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=in_features.device))
+
+    q = torch.einsum("...i,oi->...o", in_features, q_proj_weight)
+    k = torch.einsum("...i,oi->...o", in_features, k_proj_weight)
+    v = torch.einsum("...i,oi->...o", in_features, v_proj_weight)
+
+    # split into heads: (..., seq_len, d_model) -> (..., num_heads, seq_len, d_k)
+    q = q.unflatten(-1, (num_heads, d_k)).transpose(-2, -3)
+    k = k.unflatten(-1, (num_heads, d_k)).transpose(-2, -3)
+    v = v.unflatten(-1, (num_heads, d_k)).transpose(-2, -3)
+    q = run_rope(d_k, theta, max_seq_len, q, token_positions.unsqueeze(-2))
+    k = run_rope(d_k, theta, max_seq_len, k, token_positions.unsqueeze(-2))
+
+    attention = run_scaled_dot_product_attention(q, k, v, mask=causal_mask)
+    # merge heads: (..., num_heads, seq_len, d_k) -> (..., seq_len, d_model)
+    attention = attention.transpose(-2, -3).flatten(-2)
+    return torch.einsum("...i,oi->...o", attention, o_proj_weight)
 
 class RotaryPositionalEmbedding(nn.Module):
     def __init__(
