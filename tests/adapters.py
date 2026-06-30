@@ -415,7 +415,31 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+#     run_multihead_self_attention_with_rope(
+#     d_model: int,
+#     num_heads: int,
+#     max_seq_len: int,
+#     theta: float,
+#     q_proj_weight: Float[Tensor, " d_model d_model"],
+#     k_proj_weight: Float[Tensor, " d_model d_model"],
+#     v_proj_weight: Float[Tensor, " d_model d_model"],
+#     o_proj_weight: Float[Tensor, " d_model d_model"],
+#     in_features: Float[Tensor, " ... sequence_length d_model"],
+#     token_positions: Int[Tensor, " ... sequence_length"] | None = None,
+# ) -> Float[Tensor, " ... sequence_length d_model"]:
+    seq_len = in_features.shape[-2]
+    batch_size = in_features.shape[0]
+    token_positions = torch.arange(seq_len, device=in_features.device).unsqueeze(0).expand(batch_size, -1)
+
+    norm_in_features = run_rmsnorm(d_model, 1e-5, weights['ln1.weight'], in_features)
+
+    attention = run_multihead_self_attention_with_rope(d_model, num_heads, max_seq_len, theta, weights['attn.q_proj.weight'], weights['attn.k_proj.weight'], weights['attn.v_proj.weight'], weights['attn.output_proj.weight'], norm_in_features, token_positions=token_positions)
+    attention = in_features + attention
+
+    norm_attention = run_rmsnorm(d_model, 1e-5, weights['ln2.weight'], attention)
+    ffn = run_swiglu(d_model, d_ff, weights['ffn.w1.weight'], weights['ffn.w2.weight'], weights['ffn.w3.weight'], norm_attention)
+    ffn = attention + ffn
+    return ffn
 
 
 def run_transformer_lm(
@@ -497,7 +521,38 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+
+#     run_embedding(
+#     vocab_size: int,
+#     d_model: int,
+#     weights: Float[Tensor, " vocab_size d_model"],
+#     token_ids: Int[Tensor, " ..."],
+# ) -> Float[Tensor, " ... d_model"]:
+
+    embedding_output = run_embedding(vocab_size, d_model, weights['token_embeddings.weight'], in_indices)
+    # output batch_size, sequence_length, d_model
+    for i in range(num_layers):
+        embedding_output = run_transformer_block(d_model, num_heads, d_ff, context_length, rope_theta, {k.replace(f'layers.{i}.', ''): v for k, v in weights.items() if k.startswith(f'layers.{i}.')}, embedding_output)
+    # output batch_size, sequence_length, d_model
+    embedding_output = run_rmsnorm(d_model, 1e-5, weights['ln_final.weight'], embedding_output)
+    # output batch_size, sequence_length, d_model
+    return run_linear(d_model, vocab_size, weights['lm_head.weight'], embedding_output)
+    
+
+#         run_transformer_block(
+#     d_model: int,
+#     num_heads: int,
+#     d_ff: int,
+#     max_seq_len: int,
+#     theta: float,
+#     weights: dict[str, Tensor],
+#     in_features: Float[Tensor, " batch sequence_length d_model"],
+# ) -> Float[Tensor, " batch sequence_length d_model"]:
+
+    # in_indices
+    # x = in_features
+    # for i in range(num_layers):
+    #     x = transformer_block(x)
 
 
 def run_rmsnorm(
