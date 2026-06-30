@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Iterable
 from typing import IO, Any, BinaryIO
@@ -614,7 +615,12 @@ def run_get_batch(
         is the sampled input sequences, and the second tuple item is the corresponding
         language modeling labels.
     """
-    raise NotImplementedError
+    inputs, labels = [], []
+    for _ in range(batch_size):
+        i = torch.randint(0, len(dataset) - context_length, (1,)).item()
+        inputs.append(torch.tensor(dataset[i:i + context_length], dtype=torch.long))
+        labels.append(torch.tensor(dataset[i + 1:i + context_length + 1], dtype=torch.long))
+    return torch.stack(inputs).to(device), torch.stack(labels).to(device)
 
 
 def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ..."]:
@@ -674,7 +680,12 @@ def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm:
 
     The gradients of the parameters (parameter.grad) should be modified in-place.
     """
-    raise NotImplementedError
+    grads = [p.grad for p in parameters if p.grad is not None]
+    total_norm = torch.sqrt(sum(g.pow(2).sum() for g in grads))
+    if total_norm >= max_l2_norm:
+        scale = max_l2_norm / (total_norm + 1e-6)
+        for g in grads:
+            g.mul_(scale)
 
 
 class AdamW(torch.optim.Optimizer):
@@ -750,7 +761,14 @@ def run_get_lr_cosine_schedule(
     Returns:
         Learning rate at the given iteration under the specified schedule.
     """
-    raise NotImplementedError
+    if it < warmup_iters:
+        return max_learning_rate * (it / warmup_iters)
+    elif it <= cosine_cycle_iters:
+        t = it - warmup_iters
+        T_c = cosine_cycle_iters - warmup_iters
+        return min_learning_rate + 0.5 * (max_learning_rate - min_learning_rate) * (1 + math.cos(math.pi * t / T_c))
+    else:
+        return min_learning_rate
 
 
 def run_save_checkpoint(
@@ -769,7 +787,11 @@ def run_save_checkpoint(
             we've completed.
         out (str | os.PathLike | BinaryIO | IO[bytes]): Path or file-like object to serialize the model, optimizer, and iteration to.
     """
-    raise NotImplementedError
+    torch.save({
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "iteration": iteration,
+    }, out)
 
 
 def run_load_checkpoint(
@@ -790,7 +812,10 @@ def run_load_checkpoint(
     Returns:
         int: the previously-serialized number of iterations.
     """
-    raise NotImplementedError
+    checkpoint = torch.load(src)
+    model.load_state_dict(checkpoint["model"])
+    optimizer.load_state_dict(checkpoint["optimizer"])
+    return checkpoint["iteration"]
 
 
 class Tokenizer:
