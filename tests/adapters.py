@@ -1022,10 +1022,14 @@ def run_train_bpe(
     """
     import multiprocessing
     import re
+    import time
     from cs336_basics.pretokenization_example import find_chunk_boundaries
 
+    t_start = time.time()
+    print(f"[BPE] Started at {time.strftime('%H:%M:%S')}")
+
     num_processes = multiprocessing.cpu_count()
-    print(f"Pre-tokenizing with {num_processes} processes...")
+    print(f"[BPE] Pre-tokenizing with {num_processes} processes...")
 
     with open(input_path, "rb") as f:
         boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
@@ -1050,26 +1054,64 @@ def run_train_bpe(
     merges: list[tuple[bytes, bytes]] = []
     print(f"Training BPE: {num_merges} merges on {len(token_counts):,} unique tokens from {len(tokens):,} total tokens")
 
-    for merge_idx in range(num_merges):
-        # Count occurrences of each successive byte-chunk pair across all token occurrences
-        pair_counts: dict[tuple[bytes, bytes], int] = {}
-        for token, (count, chars) in token_counts.items():
-            for i in range(len(chars) - 1):
-                pair = (chars[i], chars[i + 1])
-                pair_counts[pair] = pair_counts.get(pair, 0) + count
+    # Build pair_counts and reverse index pair_to_tokens once
+    pair_counts: dict[tuple[bytes, bytes], int] = {}
+    pair_to_tokens: dict[tuple[bytes, bytes], set] = {}
+    for token, (count, chars) in token_counts.items():
+        for i in range(len(chars) - 1):
+            pair = (chars[i], chars[i + 1])
+            pair_counts[pair] = pair_counts.get(pair, 0) + count
+            if pair not in pair_to_tokens:
+                pair_to_tokens[pair] = set()
+            pair_to_tokens[pair].add(token)
 
+    for merge_idx in range(num_merges):
         if not pair_counts:
             break
 
-        # Find the pair with highest count; break ties by lexicographically greater pair
         best_pair = max(pair_counts, key=lambda p: (pair_counts[p], p))
+        merged = best_pair[0] + best_pair[1]
 
-        # Merge best_pair in each token's chars list
-        _merge_pair(token_counts, best_pair)
+        # Only update tokens that contain best_pair
+        for token in list(pair_to_tokens.get(best_pair, set())):
+            count, chars = token_counts[token]
+            # Compute new chars after merge
+            new_chars = []
+            i = 0
+            while i < len(chars):
+                if i < len(chars) - 1 and chars[i] == best_pair[0] and chars[i + 1] == best_pair[1]:
+                    new_chars.append(merged)
+                    i += 2
+                else:
+                    new_chars.append(chars[i])
+                    i += 1
+            # Compute pair-count diffs between old and new chars
+            old_pairs: dict[tuple, int] = {}
+            for i in range(len(chars) - 1):
+                p = (chars[i], chars[i + 1])
+                old_pairs[p] = old_pairs.get(p, 0) + 1
+            new_pairs: dict[tuple, int] = {}
+            for i in range(len(new_chars) - 1):
+                p = (new_chars[i], new_chars[i + 1])
+                new_pairs[p] = new_pairs.get(p, 0) + 1
+            # Apply diffs to pair_counts and pair_to_tokens
+            for p, freq in old_pairs.items():
+                pair_counts[p] = pair_counts.get(p, 0) - count * freq
+                if pair_counts.get(p, 0) <= 0:
+                    pair_counts.pop(p, None)
+            for p, freq in new_pairs.items():
+                pair_counts[p] = pair_counts.get(p, 0) + count * freq
+            for p in set(old_pairs) - set(new_pairs):
+                pair_to_tokens.get(p, set()).discard(token)
+            for p in set(new_pairs) - set(old_pairs):
+                pair_to_tokens.setdefault(p, set()).add(token)
+            token_counts[token][1] = new_chars
+
+        pair_to_tokens.pop(best_pair, None)
+
         merges.append(best_pair)
         if (merge_idx + 1) % 100 == 0 or merge_idx == 0:
-            merged = best_pair[0] + best_pair[1]
-            print(f"  merge {merge_idx+1:4d}/{num_merges} | best pair: {best_pair[0]!r} + {best_pair[1]!r} -> {merged!r} (count={pair_counts[best_pair]:,})")
+            print(f"  merge {merge_idx+1:4d}/{num_merges} | best pair: {best_pair[0]!r} + {best_pair[1]!r} -> {merged!r} (count={pair_counts.get(best_pair, '?')})")
 
     # Build vocab: start with 256 byte tokens, then special tokens, then merged tokens
     vocab: dict[int, bytes] = {i: bytes([i]) for i in range(256)}
@@ -1078,4 +1120,6 @@ def run_train_bpe(
     for pair in merges:
         vocab[len(vocab)] = pair[0] + pair[1]
 
+    elapsed = time.time() - t_start
+    print(f"[BPE] Finished at {time.strftime('%H:%M:%S')} (took {elapsed/60:.1f} min)")
     return vocab, merges
