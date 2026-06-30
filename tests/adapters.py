@@ -883,21 +883,60 @@ class Tokenizer:
         return cls(vocab, merges, special_tokens)
 
     def _apply_merges(self, chars: list[bytes]) -> list[bytes]:
-        while len(chars) >= 2:
-            # Find the highest-priority (lowest rank) merge available
-            best_rank = len(self.merges)
-            best_idx = -1
-            for i in range(len(chars) - 1):
-                pair = (chars[i], chars[i + 1])
-                rank = self._merge_rank.get(pair, len(self.merges))
-                if rank < best_rank:
-                    best_rank = rank
-                    best_idx = i
-            if best_idx == -1:
-                break
-            merged = chars[best_idx] + chars[best_idx + 1]
-            chars = chars[:best_idx] + [merged] + chars[best_idx + 2:]
-        return chars
+        import heapq
+        n = len(chars)
+        if n < 2:
+            return chars
+
+        # Represent sequence as a doubly-linked list over index arrays so
+        # merges are O(1) instead of O(n) list rebuilds.
+        tokens = list(chars)
+        prev = list(range(-1, n - 1))   # prev[i]: previous active index (-1 = none)
+        nxt  = list(range(1, n + 1))    # nxt[i]:  next active index (n = end)
+
+        # Min-heap entries: (rank, left_idx, left_tok, right_tok).
+        # Storing the token bytes at insertion time lets us detect stale entries
+        # cheaply on pop — no separate "valid" set needed.
+        heap: list = []
+        for i in range(n - 1):
+            pair = (tokens[i], tokens[i + 1])
+            rank = self._merge_rank.get(pair)
+            if rank is not None:
+                heapq.heappush(heap, (rank, i, tokens[i], tokens[i + 1]))
+
+        while heap:
+            rank, i, tok_i, tok_j = heapq.heappop(heap)
+            j = nxt[i]
+            # Stale if either neighbour has been overwritten by a prior merge.
+            if j >= n or tokens[i] != tok_i or tokens[j] != tok_j:
+                continue
+            merged = tok_i + tok_j
+            tokens[i] = merged
+            # Splice j out of the linked list and tombstone it so any stale
+            # heap entries that reference j as a left position fail the check.
+            nxt[i] = nxt[j]
+            if nxt[j] < n:
+                prev[nxt[j]] = i
+            tokens[j] = None
+            # Push new left pair if it has a merge rule.
+            if prev[i] >= 0:
+                pair = (tokens[prev[i]], merged)
+                r = self._merge_rank.get(pair)
+                if r is not None:
+                    heapq.heappush(heap, (r, prev[i], tokens[prev[i]], merged))
+            # Push new right pair if it has a merge rule.
+            if nxt[i] < n:
+                pair = (merged, tokens[nxt[i]])
+                r = self._merge_rank.get(pair)
+                if r is not None:
+                    heapq.heappush(heap, (r, i, merged, tokens[nxt[i]]))
+
+        # Collect surviving tokens in linked-list order.
+        result, i = [], 0
+        while i < n:
+            result.append(tokens[i])
+            i = nxt[i]
+        return result
 
     def _encode_chunk(self, text: str) -> list[int]:
         tokens = self._regex.findall(self._GPT2_PAT, text)
@@ -926,6 +965,76 @@ class Tokenizer:
     def encode_iterable(self, iterable: Iterable[str]):
         for text in iterable:
             yield from self.encode(text)
+
+    def encode_file(
+        self,
+        path: str | os.PathLike,
+        chunk_size: int = 1 << 20,
+    ):
+        """Encode a large file with O(chunk_size) memory.
+
+        Splits chunks so that ``to_process`` never ends with whitespace.
+        This is required because the GPT-2 regex pattern ``\\s+(?!\\S)``
+        matches a whitespace run differently depending on whether it is
+        followed by a non-whitespace character or by end-of-string, so a
+        trailing whitespace in a chunk would produce wrong tokens.
+
+        Yields token ids one by one.
+        """
+        import time
+        file_size = os.path.getsize(path)
+        bytes_done = 0
+        tokens_done = 0
+        t_start = time.time()
+        t_last = t_start
+
+        with open(path, encoding="utf-8") as f:
+            leftover = ""
+            while True:
+                raw = f.read(chunk_size)
+                if not raw:
+                    break
+                bytes_done += len(raw.encode("utf-8"))
+                text = leftover + raw
+                # Find the last word boundary: last position i where text[i-1]
+                # is non-whitespace and text[i] is whitespace.  Splitting here
+                # ensures to_process ends on a complete word (no mid-word cut)
+                # AND the leftover starts with whitespace so the GPT-2 regex
+                # can correctly compute \s+(?!\S) vs \s+ with full context.
+                split = -1
+                for i in range(len(text) - 1, 0, -1):
+                    if text[i].isspace() and not text[i - 1].isspace():
+                        split = i
+                        break
+                if split == -1:
+                    to_process, leftover = text, ""
+                else:
+                    to_process, leftover = text[:split], text[split:]
+                if to_process:
+                    chunk_ids = list(self.encode(to_process))
+                    tokens_done += len(chunk_ids)
+                    yield from chunk_ids
+
+                now = time.time()
+                if now - t_last >= 10.0:
+                    pct = bytes_done / file_size * 100 if file_size else 0
+                    elapsed = now - t_start
+                    eta = (elapsed / pct * (100 - pct)) if pct > 0 else 0
+                    print(
+                        f"  [{pct:5.1f}%] {bytes_done/1e6:.1f}/{file_size/1e6:.1f} MB  "
+                        f"{tokens_done:,} tokens  "
+                        f"elapsed {elapsed:.0f}s  eta {eta:.0f}s",
+                        flush=True,
+                    )
+                    t_last = now
+
+            if leftover:
+                chunk_ids = list(self.encode(leftover))
+                tokens_done += len(chunk_ids)
+                yield from chunk_ids
+
+        elapsed = time.time() - t_start
+        print(f"  [100.0%] done — {tokens_done:,} tokens in {elapsed:.1f}s", flush=True)
 
     def decode(self, ids: list[int]) -> str:
         raw = b"".join(self.vocab[i] for i in ids)
@@ -1070,6 +1179,7 @@ def run_train_bpe(
             break
 
         best_pair = max(pair_counts, key=lambda p: (pair_counts[p], p))
+        best_count = pair_counts[best_pair]
         merged = best_pair[0] + best_pair[1]
 
         # Only update tokens that contain best_pair
@@ -1111,7 +1221,7 @@ def run_train_bpe(
 
         merges.append(best_pair)
         if (merge_idx + 1) % 100 == 0 or merge_idx == 0:
-            print(f"  merge {merge_idx+1:4d}/{num_merges} | best pair: {best_pair[0]!r} + {best_pair[1]!r} -> {merged!r} (count={pair_counts.get(best_pair, '?')})")
+            print(f"  merge {merge_idx+1:4d}/{num_merges} | best pair: {best_pair[0]!r} + {best_pair[1]!r} -> {merged!r} (count={best_count})")
 
     # Build vocab: start with 256 byte tokens, then special tokens, then merged tokens
     vocab: dict[int, bytes] = {i: bytes([i]) for i in range(256)}
