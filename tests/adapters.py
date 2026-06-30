@@ -651,7 +651,18 @@ def run_cross_entropy(
     Returns:
         Float[Tensor, ""]: The average cross-entropy loss across examples.
     """
-    raise NotImplementedError
+    # input is the probablitiy of each vocab word, target is the index of the correct vocab word
+    max_val = inputs.max(dim=-1, keepdim=True).values
+    inputs = inputs - max_val
+
+    # exp = torch.exp(inputs[targets]) # ... batch_size
+    exp_sum = torch.sum(torch.exp(inputs), dim=-1) # ... batch_size
+    # log = -inputs[targets] + torch.log(exp_sum) # ... batch_size
+    correct_logits = inputs[torch.arange(inputs.size(0)), targets]  # (batch_size,)
+    loss = -correct_logits + torch.log(exp_sum)                     # (batch_size,)
+    return loss.mean()
+    # return 
+    # raise NotImplementedError
 
 
 def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:
@@ -666,11 +677,52 @@ def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm:
     raise NotImplementedError
 
 
+class AdamW(torch.optim.Optimizer):
+    def __init__(self, params, lr: float = 1e-3, betas: tuple = (0.9, 0.999), eps: float = 1e-8, weight_decay: float = 0.01):
+        defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+        super().__init__(params, defaults)
+
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            loss = closure()
+
+        for group in self.param_groups:
+            lr = group["lr"]
+            beta1, beta2 = group["betas"]
+            eps = group["eps"]
+            weight_decay = group["weight_decay"]
+
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+
+                grad = p.grad.data
+
+                # initialize state for this parameter
+                state = self.state[p]
+                if len(state) == 0:
+                    state["t"] = 0          # step count
+                    state["m"] = torch.zeros_like(p.data)  # 1st moment
+                    state["v"] = torch.zeros_like(p.data)  # 2nd moment
+
+                state["t"] += 1
+                t = state["t"]
+                m, v = state["m"], state["v"]
+                lr_adjust = lr * torch.sqrt(torch.tensor(1 - beta2 ** t)) / (1 - beta1 ** t)
+
+                p.data = p.data - lr * weight_decay * p.data
+                state["m"] = beta1 * m + (1 - beta1) * grad
+                state["v"] = beta2 * v + (1 - beta2) * grad * grad
+                p.data = p.data - lr_adjust * state["m"] / (torch.sqrt(state["v"]) + eps)
+        return loss
+
+
 def get_adamw_cls() -> Any:
     """
     Returns a torch.optim.Optimizer that implements AdamW.
     """
-    raise NotImplementedError
+    return AdamW
 
 
 def run_get_lr_cosine_schedule(
