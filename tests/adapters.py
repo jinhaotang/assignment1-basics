@@ -971,6 +971,28 @@ def _merge_pair(token_counts: dict[str, list], best_pair: tuple[bytes, bytes]) -
         token_counts[token][1] = new_chars
 
 
+_GPT2_PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
+
+def _pretokenize_chunk(args):
+    import re
+    import regex
+    path, start, end, special_tokens = args
+    with open(path, "rb") as f:
+        f.seek(start)
+        chunk = f.read(end - start).decode("utf-8", errors="ignore")
+    # Remove special tokens before applying GPT-2 regex
+    if special_tokens:
+        split_pat = "|".join(re.escape(t) for t in special_tokens)
+        parts = re.split(split_pat, chunk)
+    else:
+        parts = [chunk]
+    tokens = []
+    for part in parts:
+        tokens.extend(regex.findall(_GPT2_PAT, part))
+    return tokens
+
+
 def run_train_bpe(
     input_path: str | os.PathLike,
     vocab_size: int,
@@ -998,24 +1020,23 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
+    import multiprocessing
     import re
-    import regex
+    from cs336_basics.pretokenization_example import find_chunk_boundaries
 
-    GPT2_PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+    num_processes = multiprocessing.cpu_count()
+    print(f"Pre-tokenizing with {num_processes} processes...")
 
-    with open(input_path, 'r', encoding='utf-8') as f:
-        text = f.read()
+    with open(input_path, "rb") as f:
+        boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
 
-    # Split on special tokens first, then apply GPT-2 pre-tokenization to each chunk
-    if special_tokens:
-        split_pattern = "|".join(re.escape(t) for t in special_tokens)
-        chunks = re.split(split_pattern, text)
-    else:
-        chunks = [text]
+    chunk_args = [(input_path, start, end, special_tokens) for start, end in zip(boundaries[:-1], boundaries[1:])]
 
-    tokens = []
-    for chunk in chunks:
-        tokens.extend(regex.findall(GPT2_PAT, chunk))
+    with multiprocessing.Pool(num_processes) as pool:
+        results = pool.map(_pretokenize_chunk, chunk_args)
+
+    tokens = [tok for chunk_tokens in results for tok in chunk_tokens]
+    print(f"Pre-tokenization done: {len(tokens):,} tokens, {len(set(tokens)):,} unique.")
 
     # Count occurrences of each unique token; values are [count, list_of_byte_chunks]
     # Each char in the list is a bytes object (initially one byte each)
@@ -1027,8 +1048,9 @@ def run_train_bpe(
 
     num_merges = vocab_size - 256 - len(special_tokens)
     merges: list[tuple[bytes, bytes]] = []
+    print(f"Training BPE: {num_merges} merges on {len(token_counts):,} unique tokens from {len(tokens):,} total tokens")
 
-    for _ in range(num_merges):
+    for merge_idx in range(num_merges):
         # Count occurrences of each successive byte-chunk pair across all token occurrences
         pair_counts: dict[tuple[bytes, bytes], int] = {}
         for token, (count, chars) in token_counts.items():
@@ -1045,6 +1067,9 @@ def run_train_bpe(
         # Merge best_pair in each token's chars list
         _merge_pair(token_counts, best_pair)
         merges.append(best_pair)
+        if (merge_idx + 1) % 100 == 0 or merge_idx == 0:
+            merged = best_pair[0] + best_pair[1]
+            print(f"  merge {merge_idx+1:4d}/{num_merges} | best pair: {best_pair[0]!r} + {best_pair[1]!r} -> {merged!r} (count={pair_counts[best_pair]:,})")
 
     # Build vocab: start with 256 byte tokens, then special tokens, then merged tokens
     vocab: dict[int, bytes] = {i: bytes([i]) for i in range(256)}
